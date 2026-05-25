@@ -25,3 +25,8 @@ venv/
 
 # Local-only test/debug files
 _*.py
+
+# Cloudflare worker artefacts
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/migrations/0002_items_*.sql

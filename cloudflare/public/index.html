@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>КСР — семантический поиск</title>
+<style>
+  :root {
+    --bg: #f5f5f5;
+    --panel: #ffffff;
+    --border: #d0d0d0;
+    --text: #222;
+    --muted: #777;
+    --accent: #2b6cb0;
+    --hit: #fff7d6;
+    --variant: #eef5fb;
+    --variant-border: #b6d4ea;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 14px 20px;
+  }
+  header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 18px 20px; max-width: 1500px; margin: 0 auto; }
+
+  .tabs { display: flex; gap: 2px; margin-bottom: -1px; }
+  .tab {
+    background: #e7e7e7; border: 1px solid var(--border);
+    border-bottom: none; padding: 8px 16px; cursor: pointer;
+    border-radius: 4px 4px 0 0; font-size: 13px;
+  }
+  .tab.active { background: var(--panel); position: relative; z-index: 1; font-weight: 600; }
+  .tab:hover:not(.active) { background: #efefef; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 0 4px 4px 4px; padding: 14px; margin-bottom: 14px;
+  }
+  textarea {
+    width: 100%; font-family: inherit; font-size: 14px;
+    border: 1px solid var(--border); border-radius: 3px; padding: 8px;
+    resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  #q { min-height: 70px; }
+  #qBatch { min-height: 160px; font-family: Consolas, monospace; font-size: 13px; }
+
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: white; border: none;
+    padding: 8px 18px; font-size: 14px; border-radius: 3px; cursor: pointer;
+  }
+  button:hover { background: #245994; }
+  button:disabled { background: #888; cursor: wait; }
+  select, input[type=number] {
+    border: 1px solid var(--border); padding: 6px 8px;
+    border-radius: 3px; font-size: 14px; background: white;
+  }
+  label { color: var(--muted); font-size: 12px; }
+  .chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .chk input { margin: 0; }
+  .stats { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); }
+  th, td { border: 1px solid var(--border); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: #ececec; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; }
+  td.score { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  td.code  { white-space: nowrap; font-family: Consolas, monospace; font-size: 12px; }
+  td.unit  { white-space: nowrap; }
+  td.cat   { color: var(--muted); font-size: 11px; max-width: 280px; }
+  tr:hover td { background: #f9fbff; }
+  mark { background: var(--hit); padding: 0 2px; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: #eaf3ff; }
+  tr.picked td { background: #e6f8ea !important; }
+  tr.picked td:first-child::before { content: "✓ "; color: #2e7d32; font-weight: 700; }
+  .from-ex { background: #e9d8ff; color: #5a2da6; border: 1px solid #c7a5f1;
+             font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+  .feedback-toast {
+    position: fixed; bottom: 18px; right: 18px; background: #2e7d32;
+    color: white; padding: 8px 14px; border-radius: 4px; font-size: 13px;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 100;
+  }
+  .feedback-toast.show { opacity: 1; }
+
+  .variants {
+    background: var(--variant); border: 1px solid var(--variant-border);
+    border-radius: 3px; padding: 8px 10px; margin-bottom: 10px; font-size: 12px;
+  }
+  .variants .tag {
+    display: inline-block; background: white; border: 1px solid var(--variant-border);
+    padding: 2px 8px; margin: 2px; border-radius: 12px; color: var(--accent);
+  }
+  .variants .tag.orig { background: var(--variant-border); color: white; }
+  .variants .lbl { color: var(--muted); margin-right: 6px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 4px; margin-bottom: 14px; padding: 12px 14px;
+  }
+  .card h3 {
+    margin: 0 0 6px 0; font-size: 14px; font-weight: 600;
+    color: var(--accent); display: flex; gap: 10px; align-items: baseline;
+  }
+  .card h3 .n { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  .loading { padding: 18px; text-align: center; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .err { color: #c0392b; font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>КСР — поиск подходящих позиций</h1>
+  <div class="sub">Введи позицию из сметы или список — приложение найдёт похожие записи. AI-расшифровка раскрывает аббревиатуры (БДЛ, ВРУ, КТП и т.д.).</div>
+</header>
+
+<main>
+  <div class="tabs">
+    <div class="tab active" data-mode="single">Одна позиция</div>
+    <div class="tab" data-mode="batch">Список позиций</div>
+  </div>
+
+  <!-- SINGLE MODE -->
+  <div class="panel" id="panelSingle">
+    <textarea id="q" placeholder="Например: БДЛ-1   /   ВВГнг(А)-LS 3х2,5   /   КТП-630/10/0,4"></textarea>
+    <div class="row">
+      <button id="go">Найти</button>
+      <label class="chk"><input type="checkbox" id="useLLM" checked> AI-расшифровка</label>
+      <label class="chk"><input type="checkbox" id="useRerank" checked> AI-фильтр результатов</label>
+      <label>Лист:
+        <select id="sheet">
+          <option value="">все</option>
+          <option value="Материалы">Материалы</option>
+          <option value="Оборудование">Оборудование</option>
+          <option value="Машины и механизмы">Машины и механизмы</option>
+        </select>
+      </label>
+      <label>Результатов:
+        <input type="number" id="limit" value="20" min="5" max="100" style="width:60px">
+      </label>
+      <span class="stats" id="stats"></span>
+    </div>
+    <div class="hint">Ctrl+Enter — запустить поиск.</div>
+  </div>
+
+  <!-- BATCH MODE -->
+  <div class="panel" id="panelBatch" style="display:none">
+    <textarea id="qBatch" placeholder="По одной позиции в строке. Например:&#10;БДЛ-1&#10;ВВГнг(А)-LS 3х2,5&#10;КТП-630/10/0,4&#10;Трансформатор силовой 1000 кВА"></textarea>
+    <div class="row">
+      <button id="goBatch">Обработать список</button>
+      <label class="chk"><input type="checkbox" id="useLLMBatch" checked> AI-расшифровка</label>
+      <label class="chk"><input type="checkbox" id="useRerankBatch" checked> AI-фильтр результатов</label>
+      <label>Лист:
+        <select id="sheetBatch">
+          <option value="">все</option>
+          <option value="Материалы">Материалы</option>
+          <option value="Оборудование">Оборудование</option>
+          <option value="Машины и механизмы">Машины и механизмы</option>
+        </select>
+      </label>
+      <label>На позицию:
+        <input type="number" id="limitBatch" value="5" min="1" max="20" style="width:60px">
+      </label>
+    </div>
+    <div class="hint">Максимум 2000 строк. AI-расшифровка параллельно (12 потоков). При 429 от Groq позиция автоматически уходит в Gemini — большие батчи идут без потерь.</div>
+  </div>
+
+  <div id="out"></div>
+</main>
+
+<div class="feedback-toast" id="toast"></div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+
+function esc(s) {
+  return (s ?? '').toString().replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function highlight(text, queries) {
+  if (!queries || !queries.length) return esc(text);
+  const all = queries.join(' ').toLowerCase().replace(/ё/g, 'е');
+  const tokens = [...new Set(all.match(/[a-zа-я0-9.+\-х/]{2,}/gi) || [])];
+  let html = esc(text);
+  const src = html.toLowerCase().replace(/ё/g, 'е');
+  const ranges = [];
+  for (const t of tokens) {
+    if (t.length < 2) continue;
+    let from = 0;
+    while (true) {
+      const i = src.indexOf(t, from);
+      if (i < 0) break;
+      ranges.push([i, i + t.length]);
+      from = i + t.length;
+    }
+  }
+  ranges.sort((a,b) => a[0]-b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    if (merged.length && r[0] <= merged[merged.length-1][1])
+      merged[merged.length-1][1] = Math.max(merged[merged.length-1][1], r[1]);
+    else merged.push([...r]);
+  }
+  let res = '', cur = 0;
+  for (const [a,b] of merged) {
+    res += html.slice(cur, a) + '<mark>' + html.slice(a, b) + '</mark>';
+    cur = b;
+  }
+  res += html.slice(cur);
+  return res;
+}
+
+function renderVariants(variants) {
+  if (!variants || variants.length <= 1) return '';
+  let h = '<div class="variants"><span class="lbl">AI-расшифровка:</span>';
+  variants.forEach((v, i) => {
+    h += `<span class="tag ${i === 0 ? 'orig' : ''}">${esc(v)}</span>`;
+  });
+  h += '</div>';
+  return h;
+}
+
+function aiBadge(s) {
+  if (s == null) return '';
+  const colors = { 3: '#2e7d32', 2: '#558b2f', 1: '#ef6c00', 0: '#c62828' };
+  const labels = { 3: 'точно', 2: 'близко', 1: 'слабо', 0: 'мимо' };
+  return `<span style="display:inline-block;min-width:22px;text-align:center;background:${colors[s]||'#888'};color:white;border-radius:3px;padding:1px 5px;font-size:11px;font-weight:600" title="${labels[s]||''}">${s}</span>`;
+}
+
+function renderResultsTable(rows, queries, queryText, showCat = true) {
+  if (!rows.length) return '<div class="empty">Ничего не найдено</div>';
+  const hasAI = rows.some(r => r.llm_score != null);
+  let h = '<table><thead><tr>';
+  h += '<th style="width:40px">#</th>';
+  if (hasAI) h += '<th style="width:48px">AI</th>';
+  h += '<th style="width:55px">TF-IDF</th>';
+  h += '<th style="width:170px">Код</th>';
+  h += '<th>Наименование</th>';
+  h += '<th style="width:80px">Ед.</th>';
+  if (showCat) h += '<th>Раздел</th>';
+  h += '</tr></thead><tbody>';
+  rows.forEach((r, i) => {
+    const exBadge = r.from_examples ? '<span class="from-ex" title="Подсвечено из прошлых примеров">★</span>' : '';
+    h += `<tr class="clickable" data-id="${r.id}" data-query="${esc(queryText)}" title="Клик — записать как выбор для этого запроса">`;
+    h += `<td>${i+1}</td>`;
+    if (hasAI) h += `<td style="text-align:center">${aiBadge(r.llm_score)}</td>`;
+    h += `<td class="score">${r.score.toFixed(3)}</td>`;
+    h += `<td class="code">${esc(r.code)}</td>`;
+    h += `<td>${exBadge}${highlight(r.name, queries)}</td>`;
+    h += `<td class="unit">${esc(r.unit)}</td>`;
+    if (showCat) h += `<td class="cat">${esc(r.category)}</td>`;
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+  return h;
+}
+
+let TOAST_TIMER = null;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(TOAST_TIMER);
+  TOAST_TIMER = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+async function sendFeedback(query, itemId, rowEl) {
+  try {
+    const r = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query, item_id: parseInt(itemId) }),
+    }).then(r => r.json());
+    if (r.ok) {
+      // mark this row picked, unmark siblings within same table
+      const tbody = rowEl.closest('tbody');
+      tbody.querySelectorAll('tr.picked').forEach(x => x.classList.remove('picked'));
+      rowEl.classList.add('picked');
+      toast(`✓ запомнено · всего примеров: ${r.examples_total}`);
+      loadStats();
+    } else {
+      toast('Не сохранено: ' + (r.error || 'error'));
+    }
+  } catch (e) {
+    toast('Ошибка: ' + e.message);
+  }
+}
+
+document.addEventListener('click', e => {
+  const tr = e.target.closest('tr.clickable');
+  if (!tr) return;
+  const id = tr.dataset.id;
+  const q = tr.dataset.query;
+  if (id && q) sendFeedback(q, id, tr);
+});
+
+let LLM_ENABLED = false;
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats').then(r => r.json());
+    LLM_ENABLED = !!r.llm_enabled;
+    const parts = [`всего: ${r.total.toLocaleString('ru')}`];
+    for (const [k,v] of Object.entries(r.by_sheet))
+      parts.push(`${k}: ${v.toLocaleString('ru')}`);
+    parts.push(`AI: ${LLM_ENABLED ? (r.llm_providers || []).join(' + ') : 'нет ключа'}`);
+    parts.push(`примеров обучения: ${(r.examples || 0).toLocaleString('ru')}`);
+    $('#stats').textContent = parts.join(' · ');
+    if (!LLM_ENABLED) {
+      ['#useLLM','#useLLMBatch','#useRerank','#useRerankBatch'].forEach(s => {
+        const el = $(s);
+        if (el) { el.checked = false; el.disabled = true; }
+      });
+    }
+  } catch (e) {}
+}
+
+// ---------- tab switching ----------
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    const mode = t.dataset.mode;
+    $('#panelSingle').style.display = mode === 'single' ? '' : 'none';
+    $('#panelBatch').style.display = mode === 'batch' ? '' : 'none';
+    $('#out').innerHTML = '';
+  });
+});
+
+// ---------- single search ----------
+async function goSingle() {
+  const query = $('#q').value.trim();
+  if (!query) return;
+  $('#go').disabled = true;
+  $('#out').innerHTML = '<div class="loading">' +
+    ($('#useLLM').checked ? 'Расшифровываю и ищу...' : 'Ищу...') + '</div>';
+  try {
+    const r = await fetch('/api/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        query,
+        sheet: $('#sheet').value,
+        limit: parseInt($('#limit').value) || 20,
+        expand: $('#useLLM').checked,
+        rerank: $('#useRerank').checked,
+      })
+    }).then(r => r.json());
+
+    let h = renderVariants(r.variants);
+    if (r.llm && r.llm.error) h += `<div class="err">AI-расшифровка: ${esc(r.llm.error)}</div>`;
+    if (r.rerank && r.rerank.error) h += `<div class="err">AI-фильтр: ${esc(r.rerank.error)}</div>`;
+    if (r.rerank && r.rerank.no_strong_match) {
+      h += '<div class="hint" style="margin-bottom:6px;color:#c0392b">AI считает что точного аналога в КСР нет — но варианты ниже всё равно показаны. Кликни нужный, чтобы научить систему.</div>';
+    }
+    h += renderResultsTable(r.results || [], r.variants || [query], query, true);
+    $('#out').innerHTML = h;
+  } catch (e) {
+    $('#out').innerHTML = '<div class="err">Ошибка: ' + esc(e.message) + '</div>';
+  } finally {
+    $('#go').disabled = false;
+  }
+}
+
+// ---------- batch search ----------
+async function goBatch() {
+  const lines = $('#qBatch').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return;
+  $('#goBatch').disabled = true;
+  $('#out').innerHTML = `<div class="loading">Обрабатываю ${lines.length} позиций...</div>`;
+  try {
+    const r = await fetch('/api/batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        items: lines,
+        sheet: $('#sheetBatch').value,
+        limit: parseInt($('#limitBatch').value) || 5,
+        expand: $('#useLLMBatch').checked,
+        rerank: $('#useRerankBatch').checked,
+      })
+    }).then(r => r.json());
+
+    let h = '';
+    (r.items || []).forEach((it, idx) => {
+      h += '<div class="card">';
+      const warn = it.no_strong_match ? ' <span style="color:#c0392b">⚠ AI: точного аналога нет</span>' : '';
+      h += `<h3>${idx+1}. ${esc(it.query)} <span class="n">— показано: ${it.results.length}${warn}</span></h3>`;
+      if (it.llm_error) h += `<div class="err">AI-расшифровка: ${esc(it.llm_error)}</div>`;
+      if (it.rerank_error) h += `<div class="err">AI-фильтр: ${esc(it.rerank_error)}</div>`;
+      h += renderVariants(it.variants);
+      h += renderResultsTable(it.results, it.variants, it.query, false);
+      h += '</div>';
+    });
+    $('#out').innerHTML = h || '<div class="empty">Нет данных</div>';
+  } catch (e) {
+    $('#out').innerHTML = '<div class="err">Ошибка: ' + esc(e.message) + '</div>';
+  } finally {
+    $('#goBatch').disabled = false;
+  }
+}
+
+$('#q').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); goSingle(); }
+});
+$('#qBatch').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); goBatch(); }
+});
+$('#go').addEventListener('click', goSingle);
+$('#goBatch').addEventListener('click', goBatch);
+loadStats();
+$('#q').focus();
+</script>
+</body>
+</html>

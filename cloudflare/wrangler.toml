@@ -1,0 +1,26 @@
+name = "ksr-search"
+main = "src/worker.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 binding — items + examples
+[[d1_databases]]
+binding = "DB"
+database_name = "ksr-search"
+database_id = "e5e23ef3-a50f-4864-b4ed-9d9bcaec6efb"
+migrations_dir = "migrations"
+
+# Public static assets (the SPA frontend served from the same Worker)
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Default model names — secrets set via `wrangler secret put`:
+#   GROQ_API_KEY
+#   GEMINI_API_KEY
+[vars]
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+[observability]
+enabled = true
