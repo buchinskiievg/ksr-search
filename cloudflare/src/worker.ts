@@ -22,10 +22,35 @@ import { EXPAND_SYSTEM_PROMPT, RERANK_SYSTEM_PROMPT } from "./prompts";
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
+  AI: Ai;
   GROQ_API_KEY?: string;
   GEMINI_API_KEY?: string;
   GROQ_MODEL: string;
   GEMINI_MODEL: string;
+}
+
+const CF_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+// Cloudflare Workers AI: runs the model in the Worker runtime, no outbound
+// HTTP call. Primary provider because Groq blocks our IP (403) and Gemini
+// refuses our datacenter region (400). Workers AI doesn't have those
+// limitations and uses ~10–50 neurons per short chat (free tier covers it).
+async function callCfAi(env: Env, system: string, user: string): Promise<{ text: string | null; error: string | null }> {
+  try {
+    const result: any = await env.AI.run(CF_AI_MODEL as any, {
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user.trim() },
+      ],
+      max_tokens: 500,
+      temperature: 0.0,
+    });
+    const text = (result?.response || "").toString().trim();
+    if (!text) return { text: null, error: "cfai_empty" };
+    return { text, error: null };
+  } catch (e: any) {
+    return { text: null, error: `cfai_${e?.message || e?.name || "err"}`.slice(0, 80) };
+  }
 }
 
 type Item = {
@@ -98,7 +123,11 @@ async function callGroq(
         }
         return { text: null, error: "groq_429" };
       }
-      if (!r.ok) return { text: null, error: `groq_${r.status}` };
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        console.log(`groq ${r.status}: ${body.slice(0, 300)}`);
+        return { text: null, error: `groq_${r.status}` };
+      }
       const data: any = await r.json();
       return { text: (data.choices?.[0]?.message?.content || "").trim(), error: null };
     } catch (e: any) {
@@ -124,11 +153,20 @@ async function callGemini(
       }),
       signal,
     });
-    if (!r.ok) return { text: null, error: `gemini_${r.status}` };
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.log(`gemini ${r.status}: ${body.slice(0, 400)}`);
+      return { text: null, error: `gemini_${r.status}` };
+    }
     const data: any = await r.json();
-    const parts = data.candidates?.[0]?.content?.parts || [];
+    const cand = data.candidates?.[0];
+    const finish = cand?.finishReason;
+    const parts = cand?.content?.parts || [];
     const text = parts.map((p: any) => p.text || "").join("").trim();
-    if (!text) return { text: null, error: "gemini_empty" };
+    if (!text) {
+      console.log(`gemini empty: finish=${finish} safety=${JSON.stringify(cand?.safetyRatings || []).slice(0,200)}`);
+      return { text: null, error: `gemini_empty_${finish || "noreason"}` };
+    }
     return { text, error: null };
   } catch (e: any) {
     return { text: null, error: `gemini_${e?.name || "err"}` };
@@ -136,11 +174,16 @@ async function callGemini(
 }
 
 async function llmChat(env: Env, system: string, user: string): Promise<{ text: string | null; provider: string | null; error: string | null }> {
+  // CF AI primary — only provider that works reliably from a Worker.
+  const c = await callCfAi(env, system, user);
+  if (c.text !== null) return { text: c.text, provider: "cf-ai", error: null };
+  // External fallbacks — usually fail from the Worker but kept just in case
+  // a future Cloudflare colo gets allowlisted.
   const a = await callGroq(env, system, user);
   if (a.text !== null) return { text: a.text, provider: "groq", error: null };
   const b = await callGemini(env, system, user);
   if (b.text !== null) return { text: b.text, provider: "gemini", error: null };
-  return { text: null, provider: null, error: `${a.error} → ${b.error}` };
+  return { text: null, provider: null, error: `${c.error} → ${a.error} → ${b.error}` };
 }
 
 // ---------- expand ----------
@@ -398,13 +441,13 @@ export default {
         const bySheet = await env.DB.prepare(`SELECT sheet, COUNT(*) as n FROM items WHERE ${SHORT_CODE_FILTER} GROUP BY sheet`).all<any>();
         const examples = await env.DB.prepare("SELECT COUNT(*) as n FROM examples").first<any>();
         const bySource = await env.DB.prepare("SELECT source, COUNT(*) as n FROM examples GROUP BY source").all<any>();
-        const providers: string[] = [];
-        if (env.GROQ_API_KEY) providers.push(`Groq ${env.GROQ_MODEL}`);
+        const providers: string[] = [`Cloudflare ${CF_AI_MODEL}`];
+        if (env.GROQ_API_KEY) providers.push(`Groq ${env.GROQ_MODEL} (fallback)`);
         if (env.GEMINI_API_KEY) providers.push(`Gemini ${env.GEMINI_MODEL} (fallback)`);
         return json({
           total: total?.n || 0,
           by_sheet: Object.fromEntries((bySheet.results || []).map((r: any) => [r.sheet, r.n])),
-          llm_enabled: !!(env.GROQ_API_KEY || env.GEMINI_API_KEY),
+          llm_enabled: true,
           llm_providers: providers,
           examples: examples?.n || 0,
           examples_by_source: Object.fromEntries((bySource.results || []).map((r: any) => [r.source, r.n])),

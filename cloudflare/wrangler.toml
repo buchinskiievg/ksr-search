@@ -10,6 +10,15 @@ database_name = "ksr-search"
 database_id = "e5e23ef3-a50f-4864-b4ed-9d9bcaec6efb"
 migrations_dir = "migrations"
 
+# Cloudflare Workers AI — built-in Llama 3.3 70B, called directly via the
+# `AI` binding instead of going out to Groq/Gemini. Necessary because Groq
+# blocks Cloudflare Worker IPs entirely (403 Forbidden) and Gemini refuses
+# to serve our worker's APAC datacenter ("User location is not supported"
+# 400). Workers AI is the only LLM that runs reliably from a Worker.
+# Free tier: 10000 neurons/day, plenty for interactive use.
+[ai]
+binding = "AI"
+
 # Public static assets (the SPA frontend served from the same Worker)
 [assets]
 directory = "./public"
