@@ -1,0 +1,27 @@
+# Build artifacts (regenerate with: python build_index.py <xlsx>)
+ksr.sqlite
+ksr_index.pkl
+*.pkl
+
+# Source xlsx — keep out of public repo (proprietary content)
+*.xlsx
+
+# Local secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local-only test/debug files
+_*.py
