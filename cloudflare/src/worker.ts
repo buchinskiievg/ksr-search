@@ -166,8 +166,13 @@ async function expandQuery(env: Env, query: string): Promise<{ variants: string[
 }
 
 // ---------- D1 search ----------
+// КСР sheets contain both short codes (NN.N.NN.NN-XXXX, ≤ 4 dots — the
+// canonical КСР reference) and ОКПД2-prefixed long codes (NN.NN.NN.NNN.<short>-XXX-000,
+// ≥ 5 dots — duplicates of the short ones, just decorated with an external
+// classifier prefix). We want only the short rows in user-facing output.
+const SHORT_CODE_FILTER = "(LENGTH(items.code) - LENGTH(REPLACE(items.code, '.', ''))) <= 4";
+
 async function searchFts(env: Env, variants: string[], sheet: string | null, poolSize: number): Promise<Item[]> {
-  // Build OR query across all variant tokens (max score = best variant match).
   const allText = variants.map(v => normalize(v)).join(" ");
   const fts = ftsQuery(allText);
   if (!fts) return [];
@@ -179,7 +184,7 @@ async function searchFts(env: Env, variants: string[], sheet: string | null, poo
                   -bm25(items_fts) AS score
            FROM items_fts
            JOIN items ON items.id = items_fts.rowid
-           WHERE items_fts MATCH ? AND items.sheet = ?
+           WHERE items_fts MATCH ? AND items.sheet = ? AND ${SHORT_CODE_FILTER}
            ORDER BY bm25(items_fts) ASC
            LIMIT ?`;
     bindings = [fts, sheet, poolSize];
@@ -188,7 +193,7 @@ async function searchFts(env: Env, variants: string[], sheet: string | null, poo
                   -bm25(items_fts) AS score
            FROM items_fts
            JOIN items ON items.id = items_fts.rowid
-           WHERE items_fts MATCH ?
+           WHERE items_fts MATCH ? AND ${SHORT_CODE_FILTER}
            ORDER BY bm25(items_fts) ASC
            LIMIT ?`;
     bindings = [fts, poolSize];
@@ -310,7 +315,7 @@ async function pipeline(
     if (missing.length) {
       const placeholders = missing.map(() => "?").join(",");
       const { results } = await env.DB.prepare(
-        `SELECT id, sheet, code, name, unit, category FROM items WHERE id IN (${placeholders})`
+        `SELECT id, sheet, code, name, unit, category FROM items WHERE id IN (${placeholders}) AND ${SHORT_CODE_FILTER}`
       ).bind(...missing).all<any>();
       for (const r of (results || [])) {
         pool.push({
@@ -356,8 +361,8 @@ export default {
 
     try {
       if (path === "/api/stats" && req.method === "GET") {
-        const total = await env.DB.prepare("SELECT COUNT(*) as n FROM items").first<any>();
-        const bySheet = await env.DB.prepare("SELECT sheet, COUNT(*) as n FROM items GROUP BY sheet").all<any>();
+        const total = await env.DB.prepare(`SELECT COUNT(*) as n FROM items WHERE ${SHORT_CODE_FILTER}`).first<any>();
+        const bySheet = await env.DB.prepare(`SELECT sheet, COUNT(*) as n FROM items WHERE ${SHORT_CODE_FILTER} GROUP BY sheet`).all<any>();
         const examples = await env.DB.prepare("SELECT COUNT(*) as n FROM examples").first<any>();
         const bySource = await env.DB.prepare("SELECT source, COUNT(*) as n FROM examples GROUP BY source").all<any>();
         const providers: string[] = [];

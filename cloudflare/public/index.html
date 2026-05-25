@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>КСР — семантический поиск</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root {
     --bg: #f5f5f5;
@@ -87,6 +88,41 @@
     opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 100;
   }
   .feedback-toast.show { opacity: 1; }
+  .cat-path {
+    color: var(--muted); font-size: 11px; margin-top: 2px;
+    font-style: italic; line-height: 1.35;
+  }
+  .manual-search {
+    margin-top: 8px; padding: 6px 9px; background: #fafafa;
+    border: 1px dashed var(--border); border-radius: 3px; position: relative;
+  }
+  .manual-search input {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--border);
+    padding: 5px 7px; font-size: 13px; border-radius: 3px;
+  }
+  .manual-search input:focus { outline: none; border-color: var(--accent); }
+  .manual-search .lbl { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  .manual-results {
+    background: white; border: 1px solid var(--border); border-top: none;
+    max-height: 280px; overflow-y: auto; margin-top: -1px; display: none;
+  }
+  .manual-results.show { display: block; }
+  .manual-results .row {
+    padding: 5px 9px; border-bottom: 1px solid #f0f0f0; cursor: pointer;
+    font-size: 12px; display: flex; gap: 8px; align-items: flex-start;
+  }
+  .manual-results .row:hover { background: #eaf3ff; }
+  .manual-results .row .c { font-family: Consolas, monospace; color: var(--accent); white-space: nowrap; }
+  .manual-results .row .n { flex: 1; }
+  .manual-results .row .u { color: var(--muted); white-space: nowrap; }
+  .export-bar {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 14px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .export-bar button { background: #2e7d32; }
+  .export-bar button:hover { background: #1b5e20; }
+  .export-bar .info { color: var(--muted); font-size: 12px; }
 
   .variants {
     background: var(--variant); border: 1px solid var(--variant-border);
@@ -235,32 +271,139 @@ function aiBadge(s) {
   return `<span style="display:inline-block;min-width:22px;text-align:center;background:${colors[s]||'#888'};color:white;border-radius:3px;padding:1px 5px;font-size:11px;font-weight:600" title="${labels[s]||''}">${s}</span>`;
 }
 
-function renderResultsTable(rows, queries, queryText, showCat = true) {
+function shortCategory(cat) {
+  if (!cat) return '';
+  // Strip "Книга NN: " / "Часть NN.N: " / "Раздел NN.N.NN: " / "Группа NN.N.NN.NN: "
+  // prefixes — keep only the descriptive text after the colon for each level.
+  return cat.split(' / ').map(part => {
+    const m = part.match(/^[А-Я][а-я]+(?:\s\d+(?:\.\d+)*)?:\s*(.+)$/);
+    return m ? m[1] : part;
+  }).join(' › ');
+}
+
+function renderResultsTable(rows, queries, queryText) {
   if (!rows.length) return '<div class="empty">Ничего не найдено</div>';
   const hasAI = rows.some(r => r.llm_score != null);
   let h = '<table><thead><tr>';
   h += '<th style="width:40px">#</th>';
   if (hasAI) h += '<th style="width:48px">AI</th>';
-  h += '<th style="width:55px">TF-IDF</th>';
+  h += '<th style="width:55px">Релев.</th>';
   h += '<th style="width:170px">Код</th>';
-  h += '<th>Наименование</th>';
+  h += '<th>Наименование и раздел</th>';
   h += '<th style="width:80px">Ед.</th>';
-  if (showCat) h += '<th>Раздел</th>';
   h += '</tr></thead><tbody>';
   rows.forEach((r, i) => {
     const exBadge = r.from_examples ? '<span class="from-ex" title="Подсвечено из прошлых примеров">★</span>' : '';
-    h += `<tr class="clickable" data-id="${r.id}" data-query="${esc(queryText)}" title="Клик — записать как выбор для этого запроса">`;
+    const path = r.category ? `<div class="cat-path">${esc(shortCategory(r.category))}</div>` : '';
+    h += `<tr class="clickable" data-id="${r.id}" data-query="${esc(queryText)}" data-code="${esc(r.code)}" data-name="${esc(r.name)}" data-unit="${esc(r.unit || '')}" title="Клик — записать как выбор для этого запроса">`;
     h += `<td>${i+1}</td>`;
     if (hasAI) h += `<td style="text-align:center">${aiBadge(r.llm_score)}</td>`;
     h += `<td class="score">${r.score.toFixed(3)}</td>`;
     h += `<td class="code">${esc(r.code)}</td>`;
-    h += `<td>${exBadge}${highlight(r.name, queries)}</td>`;
+    h += `<td>${exBadge}${highlight(r.name, queries)}${path}</td>`;
     h += `<td class="unit">${esc(r.unit)}</td>`;
-    if (showCat) h += `<td class="cat">${esc(r.category)}</td>`;
     h += '</tr>';
   });
   h += '</tbody></table>';
   return h;
+}
+
+// ---------- inline manual search under each card ----------
+function manualSearchBlock(queryText, cardIdx) {
+  const sid = `ms-${cardIdx}`;
+  return `<div class="manual-search">
+    <div class="lbl">Не подошло? Найди вручную и кликни — алгоритм запомнит:</div>
+    <input type="text" id="${sid}-input" data-query="${esc(queryText)}"
+           placeholder="Поиск по всему классификатору...">
+    <div class="manual-results" id="${sid}-results"></div>
+  </div>`;
+}
+
+let MANUAL_TIMER = null;
+async function runManualSearch(input) {
+  const q = input.value.trim();
+  const wrap = input.parentElement.querySelector('.manual-results');
+  if (q.length < 2) { wrap.classList.remove('show'); wrap.innerHTML = ''; return; }
+  try {
+    const r = await fetch('/api/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query: q, limit: 15, expand: false, rerank: false }),
+    }).then(r => r.json());
+    if (!r.results || !r.results.length) {
+      wrap.innerHTML = '<div class="row" style="color:var(--muted);cursor:default">Ничего</div>';
+      wrap.classList.add('show'); return;
+    }
+    wrap.innerHTML = r.results.map(it => `
+      <div class="row" data-id="${it.id}" data-code="${esc(it.code)}"
+           data-name="${esc(it.name)}" data-unit="${esc(it.unit || '')}">
+        <span class="c">${esc(it.code)}</span>
+        <span class="n">${esc(it.name)}</span>
+        <span class="u">${esc(it.unit || '')}</span>
+      </div>`).join('');
+    wrap.classList.add('show');
+  } catch (e) {
+    wrap.innerHTML = `<div class="row" style="color:#c00">Ошибка: ${esc(e.message)}</div>`;
+    wrap.classList.add('show');
+  }
+}
+
+document.addEventListener('input', e => {
+  if (!e.target.matches('.manual-search input')) return;
+  clearTimeout(MANUAL_TIMER);
+  const input = e.target;
+  MANUAL_TIMER = setTimeout(() => runManualSearch(input), 250);
+});
+
+document.addEventListener('click', e => {
+  const row = e.target.closest('.manual-results .row[data-id]');
+  if (!row) return;
+  const ms = row.closest('.manual-search');
+  const input = ms.querySelector('input');
+  const origQuery = input.dataset.query;
+  const itemId = row.dataset.id;
+  // Send feedback for the ORIGINAL batch query (not the manual search text).
+  sendFeedbackManual(origQuery, parseInt(itemId), {
+    code: row.dataset.code, name: row.dataset.name, unit: row.dataset.unit,
+  }, ms.closest('.card'));
+});
+
+async function sendFeedbackManual(query, itemId, picked, cardEl) {
+  try {
+    const r = await fetch('/api/feedback', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query, item_id: itemId, weight: 1.5 }),
+    }).then(r => r.json());
+    if (!r.ok) { toast('Не сохранено: ' + (r.error || 'error')); return; }
+    toast(`✓ запомнено · всего: ${r.examples_total}`);
+    loadStats();
+    // Store the picked choice on the card so XLSX export sees it.
+    if (cardEl) {
+      cardEl.dataset.pickedCode = picked.code;
+      cardEl.dataset.pickedName = picked.name;
+      cardEl.dataset.pickedUnit = picked.unit;
+      cardEl.dataset.pickedId = String(itemId);
+      cardEl.querySelectorAll('tbody tr.picked').forEach(x => x.classList.remove('picked'));
+      // Add a badge that user picked manually
+      let badge = cardEl.querySelector('.picked-manual');
+      if (!badge) {
+        badge = document.createElement('div');
+        badge.className = 'picked-manual cat-path';
+        badge.style.color = '#2e7d32';
+        badge.style.fontStyle = 'normal';
+        badge.style.fontWeight = '600';
+        badge.style.marginTop = '6px';
+        cardEl.querySelector('.manual-search').appendChild(badge);
+      }
+      badge.textContent = `✓ выбрано: ${picked.code}  ${picked.name}`;
+    }
+    // Close dropdown
+    const wrap = cardEl?.querySelector('.manual-results');
+    if (wrap) { wrap.classList.remove('show'); wrap.innerHTML = ''; }
+    const input = cardEl?.querySelector('.manual-search input');
+    if (input) input.value = '';
+  } catch (e) {
+    toast('Ошибка: ' + e.message);
+  }
 }
 
 let TOAST_TIMER = null;
@@ -280,10 +423,18 @@ async function sendFeedback(query, itemId, rowEl) {
       body: JSON.stringify({ query, item_id: parseInt(itemId) }),
     }).then(r => r.json());
     if (r.ok) {
-      // mark this row picked, unmark siblings within same table
       const tbody = rowEl.closest('tbody');
       tbody.querySelectorAll('tr.picked').forEach(x => x.classList.remove('picked'));
       rowEl.classList.add('picked');
+      // Persist the choice on the parent card for XLSX export.
+      const card = rowEl.closest('.card');
+      if (card) {
+        card.dataset.pickedCode = rowEl.dataset.code || '';
+        card.dataset.pickedName = rowEl.dataset.name || '';
+        card.dataset.pickedUnit = rowEl.dataset.unit || '';
+        card.dataset.pickedId = String(itemId);
+        card.querySelectorAll('.picked-manual').forEach(x => x.remove());
+      }
       toast(`✓ запомнено · всего примеров: ${r.examples_total}`);
       loadStats();
     } else {
@@ -295,6 +446,7 @@ async function sendFeedback(query, itemId, rowEl) {
 }
 
 document.addEventListener('click', e => {
+  if (e.target.closest('.manual-results')) return; // handled separately
   const tr = e.target.closest('tr.clickable');
   if (!tr) return;
   const id = tr.dataset.id;
@@ -389,17 +541,30 @@ async function goBatch() {
     }).then(r => r.json());
 
     let h = '';
+    if (r.items && r.items.length) {
+      h += `<div class="export-bar">
+        <button id="exportXlsx">📥 Скачать xlsx</button>
+        <span class="info">В файл попадут: выбранная тобой позиция (клик / ручной поиск) или топ-1 если ничего не выбрано.</span>
+      </div>`;
+    }
     (r.items || []).forEach((it, idx) => {
-      h += '<div class="card">';
+      const top = (it.results && it.results.length) ? it.results[0] : null;
+      const cardAttrs = top
+        ? ` data-query="${esc(it.query)}" data-default-code="${esc(top.code)}" data-default-name="${esc(top.name)}" data-default-unit="${esc(top.unit || '')}" data-default-id="${top.id}"`
+        : ` data-query="${esc(it.query)}"`;
+      h += `<div class="card"${cardAttrs}>`;
       const warn = it.no_strong_match ? ' <span style="color:#c0392b">⚠ AI: точного аналога нет</span>' : '';
       h += `<h3>${idx+1}. ${esc(it.query)} <span class="n">— показано: ${it.results.length}${warn}</span></h3>`;
       if (it.llm_error) h += `<div class="err">AI-расшифровка: ${esc(it.llm_error)}</div>`;
       if (it.rerank_error) h += `<div class="err">AI-фильтр: ${esc(it.rerank_error)}</div>`;
       h += renderVariants(it.variants);
-      h += renderResultsTable(it.results, it.variants, it.query, false);
+      h += renderResultsTable(it.results, it.variants, it.query);
+      h += manualSearchBlock(it.query, idx);
       h += '</div>';
     });
     $('#out').innerHTML = h || '<div class="empty">Нет данных</div>';
+    const exp = $('#exportXlsx');
+    if (exp) exp.addEventListener('click', exportXlsx);
   } catch (e) {
     $('#out').innerHTML = '<div class="err">Ошибка: ' + esc(e.message) + '</div>';
   } finally {
@@ -415,6 +580,30 @@ $('#qBatch').addEventListener('keydown', e => {
 });
 $('#go').addEventListener('click', goSingle);
 $('#goBatch').addEventListener('click', goBatch);
+
+// ---------- XLSX export ----------
+function exportXlsx() {
+  const cards = [...document.querySelectorAll('.card[data-query]')];
+  if (!cards.length) { toast('Нет данных для экспорта'); return; }
+  const rows = [["Позиция сметы", "Код КСР", "Наименование КСР", "Ед.изм."]];
+  let mapped = 0, fallback = 0;
+  for (const c of cards) {
+    const q = c.dataset.query || '';
+    const code = c.dataset.pickedCode || c.dataset.defaultCode || '';
+    const name = c.dataset.pickedName || c.dataset.defaultName || '';
+    const unit = c.dataset.pickedUnit || c.dataset.defaultUnit || '';
+    rows.push([q, code, name, unit]);
+    if (c.dataset.pickedCode) mapped++; else if (code) fallback++;
+  }
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{ wch: 60 }, { wch: 22 }, { wch: 80 }, { wch: 12 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Сопоставление");
+  const fname = `КСР-сопоставление_${new Date().toISOString().slice(0,10)}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  toast(`Скачано: ${mapped} выбрано вручную, ${fallback} топ-1 авто`);
+}
+
 loadStats();
 $('#q').focus();
 </script>
