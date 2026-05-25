@@ -214,11 +214,22 @@ async function searchFts(env: Env, variants: string[], sheet: string | null, poo
 }
 
 // ---------- examples boost ----------
-async function exampleBoosts(env: Env, query: string): Promise<Map<number, number>> {
+// Returns:
+//   itemBoosts:  Map<item_id, boost>     direct hits (exact + FTS-fuzzy match)
+//   groupBoosts: Map<code_prefix, boost> fan-out by КСР group (e.g. 59.1.25.03-%)
+// The pipeline merge step applies both — direct on item id, fan-out on
+// item.code.startsWith(prefix + "-"). This handles the common case where
+// bulk-ingest labels by group code (4 segments, no -NNNN suffix), so the
+// actual matching specific item in search results would otherwise differ
+// from the ingest's "first-item-in-group" placeholder.
+type Boosts = { itemBoosts: Map<number, number>; groupBoosts: Map<string, number> };
+
+async function exampleBoosts(env: Env, query: string): Promise<Boosts> {
+  const empty: Boosts = { itemBoosts: new Map(), groupBoosts: new Map() };
   const qn = normalize(query);
-  if (!qn) return new Map();
+  if (!qn) return empty;
   const fts = ftsQuery(qn);
-  if (!fts) return new Map();
+  if (!fts) return empty;
 
   // Exact-norm match: hard boost.
   const exactSql = `SELECT item_id, weight FROM examples WHERE query_norm = ? LIMIT 20`;
@@ -236,22 +247,39 @@ async function exampleBoosts(env: Env, query: string): Promise<Map<number, numbe
     fuzzy = await env.DB.prepare(fuzzySql).bind(fts).all<any>();
   } catch { /* MATCH on empty index → no rows */ }
 
-  const boosts = new Map<number, number>();
+  const itemBoosts = new Map<number, number>();
   const BOOST_PER = 0.40;
   for (const r of exact.results || []) {
     const b = BOOST_PER * Number(r.weight);
-    boosts.set(r.item_id, Math.max(boosts.get(r.item_id) || 0, b));
+    itemBoosts.set(r.item_id, Math.max(itemBoosts.get(r.item_id) || 0, b));
   }
   const fuzzyResults = (fuzzy.results || []) as any[];
   const maxSim = fuzzyResults.length ? Math.max(...fuzzyResults.map((r: any) => Number(r.sim))) : 0;
   for (const r of fuzzyResults) {
     if (maxSim <= 0) break;
-    const normSim = Number(r.sim) / maxSim;       // 0..1
+    const normSim = Number(r.sim) / maxSim;
     if (normSim < 0.3) continue;
     const b = BOOST_PER * normSim * Number(r.weight);
-    boosts.set(r.item_id, Math.max(boosts.get(r.item_id) || 0, b));
+    itemBoosts.set(r.item_id, Math.max(itemBoosts.get(r.item_id) || 0, b));
   }
-  return boosts;
+
+  // Derive group prefixes from the directly-boosted item codes. The pipeline
+  // applies these via startsWith() on each pool item's code — far cheaper and
+  // more accurate than materialising all 3000+ siblings into the id map.
+  const groupBoosts = new Map<string, number>();
+  if (itemBoosts.size) {
+    const directIds = [...itemBoosts.keys()];
+    const placeholders = directIds.map(() => "?").join(",");
+    const direct = await env.DB.prepare(
+      `SELECT id, code FROM items WHERE id IN (${placeholders})`
+    ).bind(...directIds).all<any>();
+    const GROUP_BOOST = 0.25;
+    for (const r of (direct.results || []) as any[]) {
+      const m = String(r.code).match(/^(.+)-\d+$/);
+      if (m) groupBoosts.set(m[1], Math.max(groupBoosts.get(m[1]) || 0, GROUP_BOOST));
+    }
+  }
+  return { itemBoosts, groupBoosts };
 }
 
 // ---------- rerank ----------
@@ -300,18 +328,23 @@ async function pipeline(
   let pool = await searchFts(env, variants, sheet, poolSize);
 
   // Apply example boosts based on the ORIGINAL query (human-typed wording).
-  const boosts = await exampleBoosts(env, query);
-  if (boosts.size && pool.length) {
-    // Boost matched items; also pull in any boosted items not in the pool yet.
+  const { itemBoosts, groupBoosts } = await exampleBoosts(env, query);
+  if ((itemBoosts.size || groupBoosts.size) && pool.length) {
     const idSet = new Set(pool.map(p => p.id));
     for (const it of pool) {
-      const b = boosts.get(it.id);
-      if (b) { it.score += b; it.from_examples = true; }
+      const ib = itemBoosts.get(it.id);
+      if (ib) { it.score += ib; it.from_examples = true; }
+      // Group fan-out via code prefix
+      for (const [pfx, gb] of groupBoosts) {
+        if (it.code && it.code.startsWith(pfx + "-")) {
+          it.score += gb;
+          it.from_examples = true;
+          break;
+        }
+      }
     }
-    // Items boosted but missing from FTS pool — fetch and inject (rare but
-    // important when user previously labelled an item that doesn't share
-    // tokens with the current query).
-    const missing = [...boosts.keys()].filter(id => !idSet.has(id));
+    // Items boosted by exact id but missing from FTS pool — fetch and inject.
+    const missing = [...itemBoosts.keys()].filter(id => !idSet.has(id));
     if (missing.length) {
       const placeholders = missing.map(() => "?").join(",");
       const { results } = await env.DB.prepare(
@@ -320,7 +353,7 @@ async function pipeline(
       for (const r of (results || [])) {
         pool.push({
           id: r.id, sheet: r.sheet, code: r.code, name: r.name, unit: r.unit,
-          category: r.category, score: boosts.get(r.id) || 0, from_examples: true,
+          category: r.category, score: itemBoosts.get(r.id) || 0, from_examples: true,
         });
       }
     }
@@ -466,7 +499,18 @@ export default {
           let itemId: number | null = null;
           if (row.item_id != null) itemId = parseInt(row.item_id);
           else if (row.code) {
-            const r = await env.DB.prepare("SELECT id FROM items WHERE code = ? LIMIT 1").bind(String(row.code)).first<any>();
+            // Exact match first (NN.N.NN.NN-NNNN). If that fails, treat the
+            // input as a group prefix (NN.N.NN.NN) and pick the first item
+            // under that group. This is how conjunctural-analysis files label
+            // — by КСР group, not by specific item.
+            let r = await env.DB.prepare(
+              `SELECT id FROM items WHERE code = ? AND ${SHORT_CODE_FILTER} LIMIT 1`
+            ).bind(String(row.code)).first<any>();
+            if (!r) {
+              r = await env.DB.prepare(
+                `SELECT id FROM items WHERE code LIKE ? AND ${SHORT_CODE_FILTER} ORDER BY code LIMIT 1`
+              ).bind(String(row.code) + "-%").first<any>();
+            }
             if (!r) { skipped.push({ idx: i, reason: `code not found: ${row.code}` }); continue; }
             itemId = r.id;
           }
